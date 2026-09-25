@@ -57,10 +57,19 @@ footer.org-footer > .org-footer__inner
 
 【禁止・品質】
 - 独自のデザイン改変や不要機能追加をしない（ブリーフ／Figma指示を正とする）
-- プレースホルダ（TODO / lorem / xxx）やダミー実装を残さない
+- 文言に TODO / lorem / xxx を残さない
 - 秘密情報を埋め込まない
 - フレームワーク・ビルドツールの導入はしない
+- 画像は ./images/ 配下の既存プレースホルダ（mv.svg / feature-01.svg /
+  feature-02.svg / cta.svg）を参照する。存在しないファイル名を新たに作らない
 """.strip()
+
+PLACEHOLDER_IMAGES = (
+    ("mv.svg", "#4a5568", "Main Visual"),
+    ("feature-01.svg", "#2b6cb0", "Feature 01"),
+    ("feature-02.svg", "#2f855a", "Feature 02"),
+    ("cta.svg", "#c05621", "CTA"),
+)
 
 
 def load_config() -> None:
@@ -80,15 +89,47 @@ def load_config() -> None:
         sys.exit(1)
 
 
+def resolve_llm() -> str | None:
+    """OPENAI_MODEL_NAME があれば CrewAI 用の LLM 指定に変換する。"""
+    model = (os.getenv("OPENAI_MODEL_NAME") or "").strip()
+    if not model or model.startswith("your_"):
+        return None
+    return model if "/" in model else f"openai/{model}"
+
+
+def write_placeholder_images(images_dir: Path) -> None:
+    """実写真の代わりに簡易 SVG プレースホルダを用意する。"""
+    images_dir.mkdir(exist_ok=True)
+    for name, fill, label in PLACEHOLDER_IMAGES:
+        path = images_dir / name
+        if path.exists():
+            continue
+        path.write_text(
+            (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"'
+                f' viewBox="0 0 1200 800">\n'
+                f'  <rect width="1200" height="800" fill="{fill}"/>\n'
+                '  <text x="600" y="420" fill="#ffffff" font-size="48"'
+                ' text-anchor="middle" font-family="sans-serif">'
+                f"{label}</text>\n"
+                "</svg>\n"
+            ),
+            encoding="utf-8",
+        )
+
+
 def build_crew(topic: str, output_dir: Path) -> Crew:
     """Web制作クルーを組み立てる。"""
     search_tool = SerperDevTool()
-    images_dir = output_dir / "images"
-    images_dir.mkdir(exist_ok=True)
+    write_placeholder_images(output_dir / "images")
 
     php_path = output_dir / "index.php"
     css_path = output_dir / "style.css"
     js_path = output_dir / "org-top.js"
+    research_path = output_dir / "research.md"
+    strategy_path = output_dir / "strategy.md"
+    llm = resolve_llm()
+    agent_kwargs = {"llm": llm} if llm else {}
 
     researcher = Agent(
         role="Webリサーチャー",
@@ -104,6 +145,7 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
         tools=[search_tool],
         verbose=True,
         allow_delegation=False,
+        **agent_kwargs,
     )
 
     content_strategist = Agent(
@@ -121,6 +163,7 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
         ),
         verbose=True,
         allow_delegation=False,
+        **agent_kwargs,
     )
 
     web_developer = Agent(
@@ -136,6 +179,7 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
         ),
         verbose=True,
         allow_delegation=False,
+        **agent_kwargs,
     )
 
     qa_reviewer = Agent(
@@ -151,6 +195,7 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
         ),
         verbose=True,
         allow_delegation=False,
+        **agent_kwargs,
     )
 
     research_task = Task(
@@ -167,6 +212,7 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
         ),
         expected_output="日本語の調査レポート（箇条書き中心、実装に使える粒度）",
         agent=researcher,
+        output_file=str(research_path),
     )
 
     strategy_task = Task(
@@ -178,13 +224,15 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
             "共通HTML構造（org-header / main-view / section-wrapper--"
             "modifier / org-footer）に沿って書く\n"
             "3. 各セクションの見出し・本文案・CTA文言\n"
-            "4. 推奨CSS変数（色・余白）と画像ファイル名案（images/ 配下）\n"
+            "4. 推奨CSS変数（色・余白）。画像は "
+            "./images/mv.svg / feature-01.svg / feature-02.svg / cta.svg を使う前提で書く\n"
             "5. 開発者向け実装メモ（レイアウト、メニュー、インタラクション）\n"
             "日本語で書くこと。"
         ),
         expected_output="実装可能なサイト構成ブリーフ（日本語）",
         agent=content_strategist,
         context=[research_task],
+        output_file=str(strategy_path),
     )
 
     develop_php_task = Task(
@@ -194,7 +242,8 @@ def build_crew(topic: str, output_dir: Path) -> Crew:
             "追加要件:\n"
             "- style.css と org-top.js を link / script で外部参照する"
             "（インライン style / script / イベント禁止）\n"
-            "- 画像パスは ./images/ 配下\n"
+            "- 画像は ./images/mv.svg / feature-01.svg / feature-02.svg /"
+            " cta.svg のみ参照する\n"
             "- セマンティックなタグと適切な見出し階層\n"
             "- ヒーロー、特徴、実績/信頼、CTA、フッターを含める\n"
             "- 出力は PHP/HTML コードのみ（説明文や Markdown フェンス禁止）\n"
@@ -289,9 +338,12 @@ def main() -> None:
 
     output_dir = Path(__file__).resolve().parent / "output"
     output_dir.mkdir(exist_ok=True)
-    (output_dir / "images").mkdir(exist_ok=True)
+    write_placeholder_images(output_dir / "images")
 
+    llm = resolve_llm()
     print(f"テーマ: {topic}")
+    if llm:
+        print(f"モデル: {llm}")
     print("CrewAI エージェントを起動します...\n")
 
     crew = build_crew(topic, output_dir)
@@ -300,7 +352,10 @@ def main() -> None:
     print("\n===== 完了 =====")
     print(result)
     print(f"\n成果物ディレクトリ: {output_dir}")
-    print("  - index.php / style.css / org-top.js / images/ / review.md")
+    print(
+        "  - research.md / strategy.md / index.php / style.css /"
+        " org-top.js / images/ / review.md"
+    )
 
 
 if __name__ == "__main__":
